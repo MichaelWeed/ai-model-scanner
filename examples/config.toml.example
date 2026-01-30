@@ -1,0 +1,84 @@
+# AI Model Scanner Configuration
+# Copy this file to your platform-specific config location:
+#   macOS/Linux: ~/.config/ai-model-scanner/config.toml
+#   Windows: %APPDATA%\ai-model-scanner\config.toml
+
+[scanner]
+# Minimum file size in MB (files smaller than this will be ignored)
+min_size_mb = 500
+
+# If true, only scan known tool paths (faster but may miss models)
+known_paths_only = false
+
+# Root directories to scan (when not using known_paths_only)
+scan_roots = ["~/"]
+
+[tools]
+# Ollama model paths (platform-specific examples)
+# macOS:
+#   ollama_paths = ["~/ollama/models", "/usr/local/var/ollama/models"]
+# Linux:
+#   ollama_paths = ["~/.ollama/models", "/usr/share/ollama/models"]
+# Windows:
+#   ollama_paths = ["%USERPROFILE%\\.ollama\\models", "%LOCALAPPDATA%\\ollama\\models"]
+ollama_paths = [
+    "~/ollama/models",
+    "/usr/local/var/ollama/models"
+]
+
+# LM Studio model paths (platform-specific examples)
+# macOS:
+#   lm_studio_paths = ["~/Library/Application Support/LMStudio/models", "~/.lmstudio/models"]
+# Linux:
+#   lm_studio_paths = ["~/.local/share/lmstudio/models", "~/.lmstudio/models"]
+# Windows:
+#   lm_studio_paths = ["%LOCALAPPDATA%\\LMStudio\\models", "%USERPROFILE%\\.lmstudio\\models"]
+lm_studio_paths = [
+    "~/Library/Application Support/LMStudio/models",
+    "~/Library/Application Support/com.lmstudio.LMStudio/models",
+    "~/.lmstudio/models"
+]
+
+# ComfyUI model paths
+comfyui_paths = [
+    "~/ComfyUI/models/checkpoints",
+    "~/ComfyUI/models/loras",
+    "~/ComfyUI/models/unet",
+    "~/ComfyUI/models/vae",
+    "~/ComfyUI/models/clip"
+]
+
+# Hugging Face cache
+huggingface_paths = [
+    "~/.cache/huggingface/hub"
+]
+
+# MLX model paths
+mlx_paths = [
+    "~/mlx-community",
+    "~/Library/Application Support/mlx"
+]
+
+# Git repos/common code folders to scan for models
+code_folders = [
+    "~/Documents",
+    "~/Projects",
+    "~/code"
+]
+
+[output]
+# Default output format: table, json, csv, txt
+default_format = "table"
+
+# Group results by detected tool
+group_by_tool = true
+
+# Highlight duplicate files
+show_duplicates = true
+
+[watcher]
+# Minimum file size for watch notifications (MB)
+min_size_mb = 500
+
+# Folders to watch (defaults to known tool paths if not specified)
+watch_paths = []

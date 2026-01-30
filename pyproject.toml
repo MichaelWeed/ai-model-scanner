@@ -1,0 +1,64 @@
+[project]
+name = "ai-model-scanner"
+version = "0.1.0"
+description = "Lightweight cross-platform tool to scan for local AI model files"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    {name = "AI Model Scanner Contributors"}
+]
+license = {text = "MIT"}
+keywords = ["ai", "models", "scanner", "llm", "machine-learning", "ollama", "huggingface"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Utilities",
+    "Topic :: System :: Filesystems",
+]
+dependencies = [
+    "typer[all]>=0.9.0",
+    "rich>=13.0.0",
+    "watchdog>=3.0.0",
+    "toml>=0.10.2",
+    "plyer>=2.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.1.0",
+    "build>=0.10.0",
+    "twine>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/MichaelWeed/ai-model-scanner"
+Documentation = "https://github.com/MichaelWeed/ai-model-scanner#readme"
+Repository = "https://github.com/MichaelWeed/ai-model-scanner"
+Issues = "https://github.com/MichaelWeed/ai-model-scanner/issues"
+
+[project.scripts]
+ai-model-scanner = "ai_model_scanner.cli:app"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ai_model_scanner*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --tb=short"
