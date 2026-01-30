@@ -1,62 +1,63 @@
 # Publishing to PyPI
 
-Steps to publish `ai-model-scanner` to PyPI (and optionally TestPyPI first).
+Automated publishing uses **Trusted Publishers** (OIDC)—no API tokens in GitHub. One-time setup on PyPI and GitHub, then releases are automatic.
 
-## Prerequisites
+## One-time setup
 
-- PyPI account: https://pypi.org/account/register/
-- API token: https://pypi.org/manage/account/token/
-- Optional: TestPyPI account for dry runs: https://test.pypi.org/account/register/
+### 1. Trusted Publisher on PyPI
 
-## Steps
+- Go to https://pypi.org/manage/project/ai-model-scanner/settings/publishing/
+- “Add a new publisher” → **GitHub** tab.
+- Enter:
+  - **Owner:** `MichaelWeed`
+  - **Repository name:** `ai-model-scanner`
+  - **Workflow name:** `publish-to-pypi.yml` (exact filename)
+  - **Environment name (optional):** `pypi` (recommended for approval gates)
+- Click “Add”.
 
-**1. Bump version**  
-Set the same version in `pyproject.toml` (`[project] version = "X.Y.Z"`) and `ai_model_scanner/__init__.py` (`__version__ = "X.Y.Z"`). Use semver: major for breaking changes, minor for new features, patch for fixes.
+Repeat on **TestPyPI** (https://test.pypi.org/manage/project/ai-model-scanner/settings/publishing/) with the same values; environment can be `testpypi`.
 
-**2. Run tests**  
-```bash
-pytest tests/ -v
-```
+### 2. GitHub Environments (optional but recommended)
 
-**3. Build**  
-```bash
-pip install build twine
-python -m build
-```
-This creates `dist/` with a source tarball and a wheel.
+- Repo → **Settings** → **Environments**.
+- Create:
+  - **`pypi`** – add required reviewers or approval for production.
+  - **`testpypi`** – no approval for frequent test uploads.
 
-**4. Test install locally**  
-```bash
-pip install dist/ai_model_scanner-*.whl
-ai-model-scanner scan --help
-```
+No secrets needed; OIDC handles auth.
 
-**5. (Optional) Upload to TestPyPI**  
-```bash
-twine upload --repository testpypi dist/*
-```
-Username: `__token__`, password: your TestPyPI token. Then try:
-```bash
-pip install --index-url https://test.pypi.org/simple/ ai-model-scanner
-```
+### 3. Workflow
 
-**6. Upload to PyPI**  
-```bash
-twine upload dist/*
-```
-Username: `__token__`, password: your PyPI API token.
+`.github/workflows/publish-to-pypi.yml` is already in the repo. It:
 
-**7. Verify**  
-Check https://pypi.org/project/ai-model-scanner/ and run `pip install ai-model-scanner` in a clean environment.
+- **Builds** on every push.
+- **Publishes to PyPI** only when you push a **tag** (e.g. `v0.1.0`).
+- **Publishes to TestPyPI** on every push that is **not** a tag (e.g. pushes to `master`).
 
-## GitHub Actions
+## Releasing a new version
 
-The repo has a workflow in `.github/workflows/publish.yml` that builds and publishes when you create a release (or trigger it manually). Add a secret named `PYPI_API_TOKEN` with your PyPI token. The workflow uses `twine upload` with that token.
+1. Bump version in `pyproject.toml` and `ai_model_scanner/__init__.py` (e.g. `0.1.1`).
+2. Run tests: `pytest tests/ -v`.
+3. Commit and push.
+4. Create and push a tag:
+   ```bash
+   git tag v0.1.1
+   git push origin v0.1.1
+   ```
+5. The workflow runs; the `pypi` job publishes to PyPI. If you use environment approval, approve the run in **Actions** → workflow run → **Review deployments**.
+
+## Manual upload (no GitHub Actions)
+
+If you need to upload from your machine:
+
+- PyPI token: https://pypi.org/manage/account/token/
+- `pip install build twine && python -m build && twine upload dist/*`
+- Username: `__token__`, password: your token.
 
 ## Common issues
 
-- **“File already exists”** – That version is already on PyPI. Bump the version.
-- **“Invalid credentials”** – Use username `__token__` and the token as password. Check the token scope (project or account).
-- **“Package name already taken”** – `ai-model-scanner` is taken; pick another name or contact the current owner.
+- **“File already exists”** – That version is already on PyPI. Bump the version and push a new tag.
+- **Trusted Publisher “Workflow not found”** – Workflow filename on PyPI must be exactly `publish-to-pypi.yml` and live in `.github/workflows/`.
+- **Environment approval** – If the `pypi` environment has required reviewers, approve the deployment in the Actions run.
 
-After publishing, you can create a GitHub release, update the repo description, and point people at `pip install ai-model-scanner`.
+After publishing, check https://pypi.org/project/ai-model-scanner/ and `pip install ai-model-scanner`.
