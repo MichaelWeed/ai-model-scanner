@@ -1,6 +1,7 @@
 """Duplicate detection - hash-based grouping and duplicate identification."""
 
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List
 
 from .model_analyzer import ModelInfo

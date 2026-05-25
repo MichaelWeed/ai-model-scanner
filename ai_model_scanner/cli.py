@@ -14,7 +14,7 @@ from .cache import get_cache_info, load_scan_results, save_scan_results
 from .config import Config
 from .duplicate_detector import find_duplicates, get_duplicate_stats
 from .formatters import Formatter
-from .model_analyzer import ModelInfo
+from .model_analyzer import ModelInfo, verify_files_identical
 from .path_detector import detect_lm_studio_paths
 from .reference_finder import find_references
 from .scanner import Scanner
@@ -223,23 +223,26 @@ def scan(
                 if len(ref_models) > 5:
                     console.print(f"    ... and {len(ref_models) - 5} more")
         
-        # Offer interactive export after showing results
-        console.print("\n[yellow]Export results?[/yellow] (json/csv/txt or Enter to skip)")
-        console.print("[dim]Tip: Results are cached - run 'duplicates' or 'cleanup' without rescanning[/dim]")
-        try:
-            export_choice = input("  Format: ").strip().lower()
-            if export_choice in ['json', 'csv', 'txt']:
-                output_path = Path.cwd() / f"models.{export_choice}"
-                if export_choice == "json":
-                    formatter.export_json(models, output_path)
-                elif export_choice == "csv":
-                    formatter.export_csv(models, output_path)
-                elif export_choice == "txt":
-                    formatter.export_txt(models, output_path)
-                console.print(f"[green]✓ Exported to {output_path}[/green]")
-        except (EOFError, KeyboardInterrupt):
-            # Handle non-interactive environments (pipes, scripts, etc.)
-            pass
+        # Offer interactive export — only when stdin is a real terminal.
+        # When run via pipe or script, skip silently to avoid hanging.
+        if sys.stdin.isatty():
+            console.print("\n[yellow]Export results?[/yellow] (json/csv/txt or Enter to skip)")
+            console.print("[dim]Tip: Results are cached - run 'duplicates' or 'cleanup' without rescanning[/dim]")
+            try:
+                export_choice = input("  Format: ").strip().lower()
+                if export_choice in ['json', 'csv', 'txt']:
+                    output_path = Path.cwd() / f"models.{export_choice}"
+                    if export_choice == "json":
+                        formatter.export_json(models, output_path)
+                    elif export_choice == "csv":
+                        formatter.export_csv(models, output_path)
+                    elif export_choice == "txt":
+                        formatter.export_txt(models, output_path)
+                    console.print(f"[green]\u2713 Exported to {output_path}[/green]")
+            except (EOFError, KeyboardInterrupt):
+                pass
+        else:
+            console.print("[dim]Tip: Use --export json/csv/txt to save results[/dim]")
 
 
 @app.command()
@@ -339,8 +342,18 @@ def duplicates(
         "--use-cache/--no-cache",
         help="Use cached scan results if available (default: True)"
     ),
+    refs: bool = typer.Option(
+        False,
+        "--refs",
+        help="Search code files for references to each duplicate (slower)"
+    ),
+    verify: bool = typer.Option(
+        False,
+        "--verify",
+        help="Run full SHA-256 comparison to confirm each duplicate group is truly identical (slow for large files)"
+    ),
 ) -> None:
-    """Show detailed duplicate analysis with code references."""
+    """Show duplicate model files with ready-to-run keep commands for each copy."""
     config = Config()
     models = None
     
@@ -398,50 +411,53 @@ def duplicates(
     if not models:
         console.print("[yellow]No models found.[/yellow]")
         raise typer.Exit(0)
-    
+
     # Find duplicates
     duplicates_dict = find_duplicates(models)
-    
+
     if not duplicates_dict:
         console.print("[green]No duplicates found![/green]")
         raise typer.Exit(0)
-    
-    # Find code references for all models
-    console.print("\n[cyan]Searching for code references...[/cyan]")
-    console.print("[dim]This may take a moment. Scanning code files for model references...[/dim]")
-    console.print("[dim]Paths will appear below as references are found:[/dim]\n")
-    
-    streaming_callback = _create_streaming_callback(console)
-    
-    try:
-        all_references = find_references(
-            models, 
-            config=config,
-            progress_callback=lambda folder, searched, found: None,  # Silent progress
-            found_callback=streaming_callback
-        )
-        # Print final summary if callback supports it
-        if hasattr(streaming_callback, 'finalize'):
-            streaming_callback.finalize()
-        console.print(f"[green]✓[/green] Reference search complete")
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Reference search interrupted by user[/yellow]")
-        all_references = {}
-    except Exception as e:
-        console.print(f"\n[yellow]Warning: Reference search failed: {e}[/yellow]")
-        all_references = {}
-    
+
+    # Optional: deep verify each group with full SHA-256
+    if verify:
+        duplicates_dict = _verify_duplicate_groups(duplicates_dict, console)
+        if not duplicates_dict:
+            console.print("[green]No confirmed duplicates after full verification![/green]")
+            raise typer.Exit(0)
+
+    # Optional: find code references for all models
+    all_references: Dict[Path, List[Path]] = {}
+    if refs:
+        console.print("\n[cyan]Searching for code references...[/cyan]")
+        console.print("[dim]This may take a moment. Scanning code files for model references...[/dim]")
+        console.print("[dim]Paths will appear below as references are found:[/dim]\n")
+
+        streaming_callback = _create_streaming_callback(console)
+        try:
+            all_references = find_references(
+                models,
+                config=config,
+                progress_callback=lambda folder, searched, found: None,
+                found_callback=streaming_callback
+            )
+            if hasattr(streaming_callback, 'finalize'):
+                streaming_callback.finalize()
+            console.print(f"[green]\u2713[/green] Reference search complete")
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Reference search interrupted by user[/yellow]")
+        except Exception as e:
+            console.print(f"\n[yellow]Warning: Reference search failed: {e}[/yellow]")
+
     # Build reverse lookup: model path -> list of code files referencing it
     model_to_references: Dict[Path, List[Path]] = {}
     for code_file, ref_models in all_references.items():
         for model in ref_models:
-            if model.path not in model_to_references:
-                model_to_references[model.path] = []
-            model_to_references[model.path].append(code_file)
-    
+            model_to_references.setdefault(model.path, []).append(code_file)
+
     # Display detailed duplicate analysis
     _show_duplicate_analysis(duplicates_dict, model_to_references, console)
-    
+
     # Export if requested
     if export:
         _export_duplicates(duplicates_dict, model_to_references, export, console)
@@ -816,11 +832,16 @@ def report(
 
 @app.command()
 def keep(
-    model_path: str = typer.Argument(..., help="Path to the model file to keep (all duplicates will be deleted)"),
+    model_path: str = typer.Argument(..., help="Path to the model file to keep (all duplicates will be trashed)"),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Show what would be deleted without actually deleting"
+        help="Show what would be trashed without actually doing it"
+    ),
+    permanent: bool = typer.Option(
+        False,
+        "--permanent",
+        help="Permanently delete instead of moving to Trash (use with caution)"
     ),
     use_cache: bool = typer.Option(
         True,
@@ -828,7 +849,7 @@ def keep(
         help="Use cached scan results if available (default: True)"
     ),
 ) -> None:
-    """Keep a specific model and delete all its duplicate copies."""
+    """Keep a specific model file and move all its duplicate copies to Trash."""
     from .duplicate_detector import find_duplicates
     
     # Resolve the model path
@@ -926,57 +947,66 @@ def keep(
     console.print(f"\n[bold]Total space to free:[/bold] {format_size(total_size)}")
     
     if dry_run:
-        console.print(f"\n[yellow]Dry run: Would delete {len(unique_to_delete)} duplicate files[/yellow]")
+        console.print(f"\n[yellow]Dry run: Would trash {len(unique_to_delete)} duplicate file(s)[/yellow]")
+        for m in unique_to_delete:
+            console.print(f"  \u2192 Trash: {m.path}")
         raise typer.Exit(0)
-    
+
     # Ask for confirmation
-    console.print(f"\n[yellow]Delete {len(unique_to_delete)} duplicate files?[/yellow]")
+    action_word = "permanently delete" if permanent else "move to Trash"
+    console.print(f"\n[yellow]{action_word.capitalize()} {len(unique_to_delete)} duplicate file(s)?[/yellow]")
     console.print(f"This will free up {format_size(total_size)} of disk space.")
+    if not permanent:
+        console.print("[dim](Files go to Trash — you can recover them from there if needed)[/dim]")
     response = input("  [y/N]: ").strip().lower()
-    
+
     if response != 'y':
         console.print("[yellow]Operation cancelled.[/yellow]")
         raise typer.Exit(0)
-    
-    # Delete the duplicates
+
+    # Remove the duplicates
     deleted_count = 0
     deleted_space = 0
     errors = []
-    
+
     for model in unique_to_delete:
         try:
-            # Verify file still exists and hash matches
             if not model.path.exists():
                 console.print(f"[yellow]Skipping (file no longer exists):[/yellow] {model.path}")
                 continue
-            
-            # Verify hash matches (safety check)
+
+            # Verify hash still matches before any destructive action
             if model.hash:
                 from .model_analyzer import compute_hash
                 current_hash = compute_hash(model.path)
                 if current_hash != model.hash:
-                    console.print(f"[yellow]Skipping (hash mismatch - file may have changed):[/yellow] {model.path}")
+                    console.print(f"[yellow]Skipping (hash mismatch — file may have changed):[/yellow] {model.path}")
                     continue
-            
-            model.path.unlink()
+
+            if permanent:
+                model.path.unlink()
+                console.print(f"[green]Deleted:[/green] {model.path}")
+            else:
+                _move_to_trash(model.path)
+                console.print(f"[green]Trashed:[/green] {model.path}")
+
             deleted_count += 1
             deleted_space += model.size
-            console.print(f"[green]Deleted:[/green] {model.path}")
+
         except FileNotFoundError:
-            # File was already deleted (race condition or already gone)
-            console.print(f"[dim]Already deleted:[/dim] {model.path}")
+            console.print(f"[dim]Already gone:[/dim] {model.path}")
         except Exception as e:
             errors.append((model.path, str(e)))
-            console.print(f"[red]Error deleting {model.path}:[/red] {e}")
-    
+            console.print(f"[red]Error removing {model.path}:[/red] {e}")
+
     if errors:
-        console.print(f"\n[yellow]Warning:[/yellow] {len(errors)} file(s) could not be deleted")
-    
-    console.print(f"\n[green]✓ Deleted {deleted_count} duplicate file(s), freed {format_size(deleted_space)}[/green]")
-    
-    # Update cache by removing deleted models
-    remaining_models = [m for m in models if m.path != keep_path and m.path.exists()]
-    remaining_models.append(keep_model)  # Keep the one we're keeping
+        console.print(f"\n[yellow]Warning:[/yellow] {len(errors)} file(s) could not be removed")
+
+    action_past = "deleted" if permanent else "trashed"
+    console.print(f"\n[green]\u2713 {action_past.capitalize()} {deleted_count} duplicate file(s), freed {format_size(deleted_space)}[/green]")
+
+    # Update cache by removing trashed models
+    remaining_models = [m for m in models if m.path == keep_path or m.path.exists()]
     save_scan_results(remaining_models, {'root': str(Path.home()), 'min_size': '500MB'})
 
 
@@ -1143,55 +1173,187 @@ def _perform_health_check(models: list, console: Console) -> None:
         console.print(f"  {tool}: {count} models")
 
 
+def _move_to_trash(path: Path) -> None:
+    """
+    Move a file to the system Trash (recoverable) instead of permanently deleting it.
+
+    Platform support:
+    - macOS: uses ``osascript`` (Finder API) which correctly handles all path types
+      including network volumes and external drives.
+    - Linux: moves to ``~/.local/share/Trash/files/`` with a unique name.
+    - Windows: uses ``winshell`` or ``send2trash`` if available, otherwise raises.
+
+    Args:
+        path: Absolute path of the file to trash.
+
+    Raises:
+        OSError: If the file cannot be trashed.
+        ImportError: On Windows when neither winshell nor send2trash is available.
+    """
+    import platform
+    system = platform.system()
+
+    if system == "Darwin":
+        import subprocess
+        # AppleScript via osascript — handles spaces, special chars, and volumes
+        escaped = str(path).replace('"', '\\"')
+        result = subprocess.run(
+            ["osascript", "-e", f'tell application "Finder" to delete POSIX file "{escaped}"'],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise OSError(f"osascript failed: {result.stderr.strip()}")
+
+    elif system == "Linux":
+        import shutil
+        import time
+        trash_files = Path.home() / ".local" / "share" / "Trash" / "files"
+        trash_files.mkdir(parents=True, exist_ok=True)
+        # Ensure unique name in Trash
+        dest = trash_files / path.name
+        if dest.exists():
+            dest = trash_files / f"{path.stem}_{int(time.time())}{path.suffix}"
+        shutil.move(str(path), dest)
+
+    elif system == "Windows":
+        try:
+            import send2trash  # type: ignore
+            send2trash.send2trash(str(path))
+        except ImportError:
+            raise ImportError(
+                "send2trash is required for Trash support on Windows. "
+                "Install it with: pip install send2trash"
+            )
+    else:
+        raise OSError(f"Trash not supported on platform: {system}")
+
+
+def _verify_duplicate_groups(
+    duplicates: Dict[str, List[ModelInfo]],
+    console: Console,
+) -> Dict[str, List[ModelInfo]]:
+    """
+    Deep-verify each duplicate group with full streaming SHA-256 comparison.
+
+    For each group, every copy is compared byte-for-byte against the first copy.
+    Groups where any pair fails verification are downgraded to a warning and
+    excluded from the returned dict so they never trigger a keep command.
+
+    Args:
+        duplicates: Groups as returned by ``find_duplicates``.
+        console:    Rich console for progress output.
+
+    Returns:
+        Filtered dict containing only fully-verified duplicate groups.
+    """
+    from rich.progress import (
+        Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn,
+        TransferSpeedColumn, TimeRemainingColumn,
+    )
+
+    console.print("\n[cyan]Deep-verifying duplicate groups (full SHA-256)...[/cyan]")
+    verified: Dict[str, List[ModelInfo]] = {}
+
+    for hash_val, group in duplicates.items():
+        group_name = group[0].model_name
+        reference = group[0].path
+        group_ok = True
+
+        for other in group[1:]:
+            file_size = other.path.stat().st_size
+            label = f"[cyan]Verifying {group_name}[/cyan] ({format_size(file_size)})"
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                TimeRemainingColumn(),
+                console=console,
+                transient=True,
+            ) as bar:
+                task_id = bar.add_task(label, total=file_size)
+
+                def _cb(done: int, total: int, _bar=bar, _tid=task_id) -> None:
+                    _bar.update(_tid, completed=done)
+
+                try:
+                    identical = verify_files_identical(reference, other.path, progress_callback=_cb)
+                except OSError as exc:
+                    console.print(f"  [yellow]Warning:[/yellow] Could not read {other.path}: {exc}")
+                    identical = False
+
+            if not identical:
+                console.print(
+                    f"  [yellow]⚠ Skipping group '{group_name}'[/yellow] — "
+                    f"fast hash matched but full SHA-256 did NOT. Files differ!"
+                )
+                group_ok = False
+                break
+
+        if group_ok:
+            verified[hash_val] = group
+            console.print(f"  [green]✓ Confirmed:[/green] {group_name} ({len(group)} identical copies)")
+
+    return verified
+
+
 def _show_duplicate_analysis(
     duplicates: Dict[str, List[ModelInfo]],
     model_to_references: Dict[Path, List[Path]],
     console: Console
 ) -> None:
-    """Show detailed duplicate analysis with code references."""
+    """Show duplicate groups, then print one ready-to-run `keep` command per copy."""
     from .duplicate_detector import get_duplicate_stats
-    
+
     stats = get_duplicate_stats(duplicates)
-    
+
     console.print(f"\n[bold]Duplicate Analysis[/bold]")
     console.print(f"  Duplicate groups: {stats['duplicate_groups']}")
-    console.print(f"  Duplicate files: {stats['duplicate_files']}")
-    console.print(f"  Wasted space: {stats['wasted_space_human']}")
-    
+    console.print(f"  Duplicate files:  {stats['duplicate_files']}")
+    console.print(f"  Wasted space:     {stats['wasted_space_human']}")
     console.print("\n[bold]Detailed Duplicate Groups:[/bold]\n")
-    
+
     for i, (hash_val, dup_models) in enumerate(duplicates.items(), 1):
         file_size = dup_models[0].size
         wasted = file_size * (len(dup_models) - 1)
-        
+        n = len(dup_models)
+
         console.print(f"[bold cyan]Group {i}:[/bold cyan] {dup_models[0].model_name}")
-        console.print(f"  Size: {format_size(file_size)}")
-        console.print(f"  Copies: {len(dup_models)}")
-        console.print(f"  Wasted: {format_size(wasted)}")
-        console.print(f"  Hash: {hash_val[:16]}...")
-        
-        # Show each duplicate with references
+        console.print(f"  Each copy: {format_size(file_size)}  ·  {n} copies  ·  Wasted: {format_size(wasted)}")
+        console.print(f"  Fast-hash: {hash_val[:16]}...")
+
+        # Show each copy with optional reference info
         for j, model in enumerate(dup_models, 1):
             refs = model_to_references.get(model.path, [])
-            status = "[green]✓ Referenced[/green]" if refs else "[yellow]⚠ Not referenced[/yellow]"
-            
-            console.print(f"\n  [bold]Copy {j}:[/bold] {status}")
-            console.print(f"    Path: {model.path}")
-            
+            ref_tag = "[green]\u2713 Referenced[/green]" if refs else "[yellow]\u26a0 Not referenced[/yellow]"
+            console.print(f"\n  [bold]Copy {j}:[/bold] {ref_tag}")
+            console.print(f"    {model.path}")
             if refs:
-                console.print(f"    Referenced in {len(refs)} file(s):")
-                for ref_file in refs[:5]:  # Show first 5
-                    # Truncate path for readability
+                console.print(f"    [dim]Referenced in {len(refs)} file(s):[/dim]")
+                for ref_file in refs[:3]:
                     ref_str = str(ref_file)
                     if len(ref_str) > 80:
                         ref_str = "..." + ref_str[-77:]
-                    console.print(f"      • {ref_str}")
-                if len(refs) > 5:
-                    console.print(f"      ... and {len(refs) - 5} more")
-            else:
-                console.print(f"    [dim]No code references found[/dim]")
-        
-        console.print()  # Blank line between groups
+                    console.print(f"      [dim]• {ref_str}[/dim]")
+                if len(refs) > 3:
+                    console.print(f"      [dim]... and {len(refs) - 3} more[/dim]")
+
+        # ---- Ready-to-run keep commands — one per copy ----
+        console.print()
+        console.print("  [bold]─── To remove a copy, run the command for the file you want to KEEP ───[/bold]")
+        for j, keep_model in enumerate(dup_models, 1):
+            # Describe what the other copies are
+            others = [m for m in dup_models if m.path != keep_model.path]
+            other_desc = ", ".join(
+                f"Copy {k}" for k, m in enumerate(dup_models, 1)
+                if m.path != keep_model.path
+            )
+            console.print(f"\n  [bold green]$ ai-model-scanner keep \"{keep_model.path}\"[/bold green]")
+            console.print(f"    [dim]→ keeps Copy {j}, moves {other_desc} to Trash[/dim]")
+
+        console.print()  # blank line between groups
 
 
 def _export_duplicates(

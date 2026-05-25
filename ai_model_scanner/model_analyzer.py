@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .utils import format_size, is_recent_file
 
@@ -39,38 +39,52 @@ class ModelInfo:
         }
 
 
-def compute_hash(filepath: Path, max_bytes: int = 1024 * 1024) -> str:
+def compute_hash(filepath: Path, sample_bytes: int = 1024 * 1024) -> str:
     """
-    Compute SHA256 hash of file.
-    
-    For large files (>10MB), only hash the first max_bytes for performance.
-    For smaller files, hash the entire file.
-    
+    Compute a fast, reliable file fingerprint using a head+tail+size strategy.
+
+    For large files (>10MB):
+      - Reads the first ``sample_bytes`` (default 1 MB)
+      - Reads the last ``sample_bytes``
+      - Encodes the exact file size
+
+    This prevents false-positive duplicate detection between models that share
+    the same first megabyte (common with quantised GGUF variants of the same
+    base model) while remaining far faster than a full-file SHA-256.
+
+    For small files (<=10MB) the entire file is hashed.
+
     Args:
         filepath: Path to file
-        max_bytes: Maximum bytes to read for large files (default 1MB)
-        
+        sample_bytes: Bytes to read from head and tail for large files (default 1 MB)
+
     Returns:
-        SHA256 hash as hex string
+        SHA256 hex-digest fingerprint string, or empty string on error
     """
     sha256 = hashlib.sha256()
-    
+
     try:
         file_size = filepath.stat().st_size
-        
+        # Encode the size so two files that happen to share head+tail bytes
+        # but differ in length are never considered equal.
+        sha256.update(file_size.to_bytes(8, byteorder='little'))
+
         with open(filepath, 'rb') as f:
-            if file_size > 10 * 1024 * 1024:  # Files > 10MB
-                # Only hash first max_bytes
-                data = f.read(max_bytes)
+            if file_size > 10 * 1024 * 1024:  # > 10 MB: sample head + tail
+                head = f.read(sample_bytes)
+                sha256.update(head)
+                # Seek to last sample_bytes (or start of file if smaller)
+                tail_offset = max(file_size - sample_bytes, len(head))
+                if tail_offset > len(head):
+                    f.seek(tail_offset)
+                    tail = f.read(sample_bytes)
+                    sha256.update(tail)
             else:
-                # Hash entire file for smaller files
-                data = f.read()
-            
-            sha256.update(data)
-        
+                # Small file: hash everything
+                sha256.update(f.read())
+
         return sha256.hexdigest()
-    except (OSError, IOError) as e:
-        # Return empty hash on error
+    except (OSError, IOError):
         return ""
 
 
@@ -115,6 +129,9 @@ def parse_model_name(filename: str) -> str:
         match = re.search(pattern, name, re.IGNORECASE)
         if match:
             result = formatter(match)
+            # Strip leading/trailing hyphens that arise from empty capture groups
+            if result:
+                result = result.strip('-')
             if result:
                 return result
     
@@ -134,7 +151,7 @@ def analyze_model_file(
     filepath: Path,
     min_size_bytes: int = 0,
     compute_hash_value: bool = True,
-    detect_tool_func=None
+    detect_tool_func: Optional[Callable[[Path], str]] = None
 ) -> Optional[ModelInfo]:
     """
     Analyze a model file and extract all metadata.
@@ -179,8 +196,12 @@ def analyze_model_file(
         # Check if recent
         is_recent = is_recent_file(filepath, days=30)
         
+        # Resolve to canonical path — prevents the same file appearing twice
+        # when reached via different scan paths (symlinks, extra_model_paths, etc.)
+        canonical_path = filepath.resolve()
+
         return ModelInfo(
-            path=filepath,
+            path=canonical_path,
             size=file_size,
             size_human=format_size(file_size),
             modified_date=modified_date,
@@ -190,6 +211,71 @@ def analyze_model_file(
             hash=hash_value,
             is_recent=is_recent,
         )
-    except (OSError, IOError) as e:
+    except (OSError, IOError):
         # Skip files we can't access
         return None
+
+
+def verify_files_identical(
+    path_a: Path,
+    path_b: Path,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    chunk_size: int = 8 * 1024 * 1024,
+) -> bool:
+    """
+    Definitively confirm two files are byte-for-byte identical via streaming SHA-256.
+
+    Unlike ``compute_hash`` (which samples only the head, tail, and size for
+    speed), this function reads every byte of both files simultaneously,
+    bailing out at the first difference. It is intentionally slower — use it
+    only when you need a guarantee before a destructive action.
+
+    Size is checked first as a fast-reject: files of different sizes are
+    never identical.
+
+    Args:
+        path_a: First file path.
+        path_b: Second file path.
+        progress_callback: Optional ``(bytes_read, total_bytes)`` callable
+            called after each chunk, suitable for driving a progress bar.
+        chunk_size: Read chunk size in bytes (default 8 MB).
+
+    Returns:
+        ``True`` if files are identical, ``False`` otherwise.
+
+    Raises:
+        OSError: If either file cannot be opened or read.
+    """
+    stat_a = path_a.stat()
+    stat_b = path_b.stat()
+
+    # Fast reject: different sizes → cannot be identical
+    if stat_a.st_size != stat_b.st_size:
+        return False
+
+    total = stat_a.st_size
+    bytes_read = 0
+    sha_a = hashlib.sha256()
+    sha_b = hashlib.sha256()
+
+    with open(path_a, 'rb') as fa, open(path_b, 'rb') as fb:
+        while True:
+            chunk_a = fa.read(chunk_size)
+            chunk_b = fb.read(chunk_size)
+
+            # Bail at first difference — no need to finish the hash
+            if chunk_a != chunk_b:
+                return False
+
+            if not chunk_a:
+                # Both EOF simultaneously (guaranteed by size equality)
+                break
+
+            sha_a.update(chunk_a)
+            sha_b.update(chunk_b)
+            bytes_read += len(chunk_a)
+
+            if progress_callback is not None:
+                progress_callback(bytes_read, total)
+
+    return sha_a.hexdigest() == sha_b.hexdigest()

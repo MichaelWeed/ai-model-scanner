@@ -2,6 +2,7 @@
 
 import os
 import sys
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -39,6 +40,8 @@ class Config:
         self.config_data: Dict = {}
         # Cache default paths to avoid repeated detection
         self._default_paths_cache: Optional[Dict[str, List[str]]] = None
+        # Backing store for the settable watcher_min_size_mb property
+        self._watcher_min_size_mb: Optional[int] = None
         self.load_config()
     
     @staticmethod
@@ -147,8 +150,11 @@ class Config:
             with open(self.config_path, 'w') as f:
                 toml.dump(self.config_data, f)
         except Exception as e:
-            # Silently fail - don't break scanning if config can't be saved
-            pass
+            warnings.warn(
+                f"Could not save config to {self.config_path}: {e}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     
     def add_discovered_path(self, tool_name: str, path: str) -> bool:
         """
@@ -293,7 +299,14 @@ class Config:
     @property
     def watcher_min_size_mb(self) -> int:
         """Minimum file size for watcher notifications."""
+        if self._watcher_min_size_mb is not None:
+            return self._watcher_min_size_mb
         return self.get("watcher", "min_size_mb", 500)
+
+    @watcher_min_size_mb.setter
+    def watcher_min_size_mb(self, value: int) -> None:
+        """Set minimum file size for watcher notifications."""
+        self._watcher_min_size_mb = value
     
     @property
     def watcher_paths(self) -> List[str]:

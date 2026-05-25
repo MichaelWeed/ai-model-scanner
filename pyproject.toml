@@ -18,6 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
     "Topic :: Utilities",
     "Topic :: System :: Filesystems",
@@ -27,16 +28,21 @@ dependencies = [
     "rich>=13.0.0",
     "watchdog>=3.0.0",
     "toml>=0.10.2",
-    "plyer>=2.1.0",
+    # plyer is an optional dependency — only needed for desktop notifications.
+    # Install with: pip install ai-model-scanner[notifications]
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-mock>=3.0.0",
     "ruff>=0.1.0",
     "build>=0.10.0",
     "twine>=4.0.0",
+]
+notifications = [
+    "plyer>=2.1.0",
 ]
 
 [project.urls]

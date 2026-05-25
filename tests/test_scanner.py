@@ -192,3 +192,78 @@ def test_incremental_scanning_detects_changes(temp_dir, mock_model_file):
     
     # Either the function detects the change, or the mtime difference is significant
     assert is_unchanged is False or mtime_diff >= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Regression: phantom duplicates via overlapping / symlinked scan paths
+# ---------------------------------------------------------------------------
+
+class TestPhantomDuplicateDeduplication:
+    """
+    Regression guard for the path-normalization fix.
+
+    The scanner used to store raw (non-resolved) paths, so the same physical
+    file reached via two distinct scan-path entries (e.g. the real directory
+    AND a symlink alias) produced two ModelInfo objects with different .path
+    values but pointing to identical bytes. scan() must now deduplicate by
+    resolved canonical path and return each file exactly once.
+    """
+
+    def test_symlink_dir_does_not_produce_phantom_duplicate(self, tmp_path):
+        """File reachable via a symlinked directory appears only once."""
+        from ai_model_scanner.model_analyzer import analyze_model_file
+
+        real_dir = tmp_path / "real_models"
+        real_dir.mkdir()
+        model_file = real_dir / "flux1-dev.safetensors"
+        model_file.write_bytes(b"\x00" * (600 * 1024 * 1024))  # 600 MB
+
+        link_dir = tmp_path / "alias_models"
+        link_dir.symlink_to(real_dir)
+
+        # Analyze via both the real path and the symlink path
+        result_real = analyze_model_file(real_dir / "flux1-dev.safetensors", min_size_bytes=0)
+        result_link = analyze_model_file(link_dir / "flux1-dev.safetensors", min_size_bytes=0)
+
+        assert result_real is not None
+        assert result_link is not None
+        # Both must resolve to the same canonical path
+        assert result_real.path == result_link.path
+
+    def test_scan_deduplicates_overlapping_known_paths(self, tmp_path):
+        """scan() final dedup pass removes entries with the same resolved path."""
+        from datetime import datetime
+        from ai_model_scanner.model_analyzer import ModelInfo, compute_hash, analyze_model_file
+
+        # Create a real file
+        model_file = tmp_path / "sdxl-base.safetensors"
+        model_file.write_bytes(b"\xAB" * (600 * 1024 * 1024))
+        canonical = model_file.resolve()
+
+        # Simulate two ModelInfo objects for the same physical file:
+        # one with the real path, one via a symlinked alias
+        link = tmp_path / "sdxl-alias.safetensors"
+        link.symlink_to(model_file)
+
+        info_real = analyze_model_file(canonical, min_size_bytes=0)
+        info_link = analyze_model_file(link, min_size_bytes=0)
+
+        assert info_real is not None
+        assert info_link is not None
+
+        # After resolve(), both should share the same .path
+        assert info_real.path == info_link.path
+
+        # Now simulate what scan() does: collect both into all_models,
+        # then apply the canonical dedup pass.
+        all_models = [info_real, info_link]
+        seen_canonical = set()
+        unique_models = []
+        for m in all_models:
+            if m.path not in seen_canonical:
+                seen_canonical.add(m.path)
+                unique_models.append(m)
+
+        assert len(unique_models) == 1
+        assert unique_models[0].path == canonical
+

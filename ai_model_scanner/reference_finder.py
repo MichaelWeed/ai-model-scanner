@@ -1,10 +1,16 @@
 """Reference finder - search code files for model references."""
 
+import os
+import re
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
 from .config import Config
 from .model_analyzer import ModelInfo
+
+# Minimum character length for a search term to be used.
+# Short terms like "vae", "clip", "bin" produce too many false positives.
+_MIN_TERM_LENGTH = 5
 
 
 def find_references(
@@ -17,162 +23,171 @@ def find_references(
 ) -> Dict[Path, List[ModelInfo]]:
     """
     Search code files for references to model files.
-    
+
+    Uses a single compiled regex per file (instead of iterating over every
+    model for every file) to keep time complexity at O(files) rather than
+    O(models × files).
+
     Args:
         models: List of ModelInfo objects to search for
         code_folders: List of folders to search (defaults to config)
         config: Configuration object
         progress_callback: Optional callback function(folder, files_searched, files_found)
-        found_callback: Optional callback function(code_file, found_models) called when references are found
+        found_callback: Optional callback function(code_file, found_models) called when
+            references are found
         max_files: Maximum number of files to search per folder (default: 10000)
-        
+
     Returns:
         Dictionary mapping code file path to list of referenced models
     """
     if config is None:
         config = Config()
-    
+
     if code_folders is None:
         code_folders = config.code_folders
-    
-    # Build search terms from model filenames and model names
-    search_terms: Set[str] = set()
-    for model in models:
-        # Add filename (with and without extension)
-        search_terms.add(model.path.name)
-        search_terms.add(model.path.stem)
-        # Add model name if different
-        if model.model_name.lower() != model.path.stem.lower():
-            search_terms.add(model.model_name.lower())
-    
+
+    # -----------------------------------------------------------------------
+    # Build the lookup structures once, before the file-scan loop.
+    # -----------------------------------------------------------------------
+
+    # Map each search term → set of model indices that match it.
+    # We only keep terms long enough to avoid generic false positives.
+    term_to_model_indices: Dict[str, Set[int]] = {}
+
+    for idx, model in enumerate(models):
+        candidates: Set[str] = set()
+        # Full filename (e.g. "llama-3-8b-q4_k_m.gguf")
+        candidates.add(model.path.name.lower())
+        # Stem (e.g. "llama-3-8b-q4_k_m")
+        candidates.add(model.path.stem.lower())
+        # Parsed model name if meaningfully different
+        mn = model.model_name.lower()
+        if mn != model.path.stem.lower():
+            candidates.add(mn)
+
+        for term in candidates:
+            if len(term) >= _MIN_TERM_LENGTH:
+                term_to_model_indices.setdefault(term, set()).add(idx)
+
+    if not term_to_model_indices:
+        return {}
+
+    # Compile a single regex that matches any of the search terms.
+    # re.escape ensures filenames with dots/hyphens don't break the pattern.
+    pattern = re.compile(
+        "|".join(re.escape(t) for t in term_to_model_indices),
+        re.IGNORECASE,
+    )
+
     # File extensions to search
-    code_extensions = ['.py', '.yml', '.yaml', '.json', '.toml', '.txt', '.md']
-    
+    code_extensions = frozenset({'.py', '.yml', '.yaml', '.json', '.toml', '.txt', '.md'})
+
     # Directories to skip (common non-code directories)
     skip_dirs = {
-        '.git', '.svn', '.hg', '.bzr',  # Version control
-        '__pycache__', '.pytest_cache', '.mypy_cache',  # Python caches
-        'node_modules', '.next', '.nuxt',  # Node.js
-        '.venv', 'venv', 'env', '.env',  # Virtual environments
-        '.idea', '.vscode', '.vs',  # IDE directories
-        'build', 'dist', '.build', '.dist',  # Build artifacts
-        '.cache', 'cache',  # Caches
-        'target',  # Rust/Java builds
-        '.gradle',  # Gradle
+        '.git', '.svn', '.hg', '.bzr',
+        '__pycache__', '.pytest_cache', '.mypy_cache',
+        'node_modules', '.next', '.nuxt',
+        '.venv', 'venv', 'env', '.env',
+        '.idea', '.vscode', '.vs',
+        'build', 'dist', '.build', '.dist',
+        '.cache', 'cache',
+        'target',
+        '.gradle',
     }
-    
-    # Results: code file -> list of models referenced
+
+    # Results: code file → list of models referenced
     references: Dict[Path, List[ModelInfo]] = {}
-    
-    # Search each code folder
+
     for folder_str in code_folders:
         try:
             folder = Path(folder_str).expanduser().resolve()
             if not folder.exists() or not folder.is_dir():
                 continue
-            
+
             files_searched = 0
             files_found = 0
-            
-            # Recursively search for code files
-            for code_file in folder.rglob("*"):
-                # Stop if we've searched too many files
+
+            # os.walk with in-place dirnames pruning is the correct way to
+            # prevent descent into skipped directories (rglob cannot do this).
+            for dirpath, dirnames, filenames in os.walk(folder):
+                # Prune skipped directories in-place so os.walk won't recurse
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in skip_dirs and not d.startswith('.')
+                ]
+
+                for filename in filenames:
+                    if files_searched >= max_files:
+                        break
+
+                    if Path(filename).suffix.lower() not in code_extensions:
+                        continue
+
+                    code_file = Path(dirpath) / filename
+
+                    # Skip large files (likely not code)
+                    try:
+                        if code_file.stat().st_size > 10 * 1024 * 1024:  # 10 MB
+                            continue
+                    except OSError:
+                        continue
+
+                    files_searched += 1
+
+                    found_models = _search_file_for_models(
+                        code_file, models, pattern, term_to_model_indices
+                    )
+                    if found_models:
+                        references[code_file] = found_models
+                        files_found += 1
+                        if found_callback:
+                            found_callback(code_file, found_models)
+
+                    if progress_callback and files_searched % 100 == 0:
+                        progress_callback(folder, files_searched, files_found)
+
                 if files_searched >= max_files:
                     break
-                
-                # Skip directories in skip list
-                if code_file.is_dir():
-                    if code_file.name in skip_dirs:
-                        # Skip this directory and its contents
-                        continue
-                    continue
-                
-                if not code_file.is_file():
-                    continue
-                
-                # Skip files in skipped directories (check parent path)
-                if any(skip_dir in code_file.parts for skip_dir in skip_dirs):
-                    continue
-                
-                if code_file.suffix.lower() not in code_extensions:
-                    continue
-                
-                # Skip large files (likely not code)
-                try:
-                    if code_file.stat().st_size > 10 * 1024 * 1024:  # 10MB
-                        continue
-                except OSError:
-                    continue
-                
-                files_searched += 1
-                
-                # Search file for model references
-                found_models = _search_file_for_models(code_file, models, search_terms)
-                if found_models:
-                    references[code_file] = found_models
-                    files_found += 1
-                    # Call found callback immediately when references are found
-                    if found_callback:
-                        found_callback(code_file, found_models)
-                
-                # Call progress callback every 100 files
-                if progress_callback and files_searched % 100 == 0:
-                    progress_callback(folder, files_searched, files_found)
-            
+
             if progress_callback:
                 progress_callback(folder, files_searched, files_found)
+
         except (OSError, PermissionError):
-            # Skip inaccessible folders
             continue
-    
+
     return references
 
 
 def _search_file_for_models(
     code_file: Path,
     models: List[ModelInfo],
-    search_terms: Set[str]
+    pattern: re.Pattern,
+    term_to_model_indices: Dict[str, Set[int]],
 ) -> List[ModelInfo]:
     """
-    Search a single file for model references.
-    
+    Search a single file for model references using a pre-compiled regex.
+
+    The file is read once; the regex finds all matching terms in a single
+    pass, then we resolve which models each match belongs to.
+
     Args:
         code_file: Path to code file
-        models: List of models to search for
-        search_terms: Set of search terms (filenames, model names)
-        
+        models: Master list of models (indexed)
+        pattern: Pre-compiled regex covering all search terms
+        term_to_model_indices: Map from lower-cased search term to model indices
+
     Returns:
-        List of models referenced in the file
+        Deduplicated list of models referenced in the file
     """
-    found_models: List[ModelInfo] = []
-    
     try:
-        with open(code_file, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read().lower()
-            
-            # Check each model
-            for model in models:
-                # Check if filename appears
-                if model.path.name.lower() in content or model.path.stem.lower() in content:
-                    found_models.append(model)
-                    continue
-                
-                # Check if model name appears
-                if model.model_name.lower() in content:
-                    found_models.append(model)
-                    continue
-                
-                # Check if any search term appears (for partial matches)
-                for term in search_terms:
-                    if term.lower() in content:
-                        # Verify this term is related to this model
-                        if (term.lower() in model.path.name.lower() or
-                            term.lower() in model.model_name.lower()):
-                            if model not in found_models:
-                                found_models.append(model)
-                            break
-    except (OSError, UnicodeDecodeError):
-        # Skip files we can't read
-        pass
-    
-    return found_models
+        content = code_file.read_text(encoding='utf-8', errors='ignore').lower()
+    except OSError:
+        return []
+
+    matched_indices: Set[int] = set()
+    for match in pattern.finditer(content):
+        term = match.group(0)
+        indices = term_to_model_indices.get(term, set())
+        matched_indices.update(indices)
+
+    return [models[i] for i in sorted(matched_indices)]

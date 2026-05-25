@@ -154,3 +154,80 @@ def test_save_and_load_scan_results(temp_dir):
         assert len(models) == 1
         assert models[0].path == model_file
         assert params == scan_params
+
+
+def test_load_scan_results_corrupt_cache(temp_dir):
+    """Test that a corrupt cache file returns None with a warning (not a crash)."""
+    import warnings
+
+    corrupt_file = temp_dir / "corrupt_cache.json"
+    corrupt_file.write_text("{this is not valid json!!!")
+
+    with patch("ai_model_scanner.cache.get_cache_path", return_value=corrupt_file):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = load_scan_results(max_age_hours=24)
+
+    assert result is None
+    assert any(issubclass(warning.category, RuntimeWarning) for warning in w), \
+        "Expected a RuntimeWarning for corrupt cache"
+
+
+def test_load_scan_results_expired_cache(temp_dir):
+    """Test that an expired cache is not returned."""
+    model_file = temp_dir / "model.gguf"
+    model_file.write_bytes(b"\x00" * 512)
+
+    model = ModelInfo(
+        path=model_file,
+        size=512,
+        size_human="512.00 B",
+        modified_date=datetime.now(),
+        extension=".gguf",
+        model_name="model",
+        tool="Test",
+        hash="",
+        is_recent=False,
+    )
+
+    cache_file = temp_dir / "expired_cache.json"
+    with patch("ai_model_scanner.cache.get_cache_path", return_value=cache_file):
+        save_scan_results([model], {})
+
+    # Back-date the file's mtime by 25 hours so it's "expired"
+    import os
+    old_time = time.time() - 25 * 3600
+    os.utime(str(cache_file), (old_time, old_time))
+
+    with patch("ai_model_scanner.cache.get_cache_path", return_value=cache_file):
+        result = load_scan_results(max_age_hours=24)
+
+    assert result is None, "Expired cache should return None"
+
+
+def test_save_scan_results_warns_on_unwritable(temp_dir):
+    """Test that a write failure issues a RuntimeWarning instead of silently failing."""
+    import warnings
+
+    unwritable = temp_dir / "no_write" / "cache.json"
+    # Parent directory does not exist — write will fail
+
+    with patch("ai_model_scanner.cache.get_cache_path", return_value=unwritable):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            save_scan_results([], {})
+
+    assert any(issubclass(warning.category, RuntimeWarning) for warning in w), \
+        "Expected a RuntimeWarning when cache cannot be written"
+
+
+def test_load_directory_index_corrupt(temp_dir):
+    """Test that a corrupt directory index returns empty dict without crashing."""
+    corrupt = temp_dir / "corrupt_index.json"
+    corrupt.write_text("{bad json")
+
+    with patch("ai_model_scanner.cache.get_directory_index_path", return_value=corrupt):
+        result = load_directory_index()
+
+    assert result == {}
+

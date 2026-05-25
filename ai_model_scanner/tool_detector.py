@@ -34,6 +34,30 @@ def detect_tool(filepath: Path) -> str:
     # Check for Hugging Face
     if 'huggingface' in path_str or 'hugging_face' in path_str or '.cache/huggingface' in path_str:
         return "Hugging Face"
+
+    # Check for Chroma (vector DB — stores ONNX embedding models)
+    if 'chroma' in path_str and 'onnx_models' in path_str:
+        return "Chroma"
+
+    # Check for sentence-transformers
+    if 'sentence-transformers' in path_str or 'sentence_transformers' in path_str:
+        return "Sentence Transformers"
+
+    # Check for Whisper local cache dirs (.whisper-models, .whisper_velocity)
+    if '.whisper' in path_str or 'whisper-models' in path_str or 'whisper_velocity' in path_str:
+        return "Whisper"
+
+    # Check for ONNX Runtime standalone model dirs
+    if 'onnx' in path_str and ('models' in path_str or 'runtime' in path_str):
+        return "ONNX Runtime"
+
+    # Check for Draw Things (iOS/macOS image generation app)
+    if 'draw-things' in path_str or 'draw_things' in path_str or 'drawthings' in path_str:
+        return "Draw Things"
+
+    # Check for AI-Toolkit (LoRA / fine-tuning)
+    if 'ai-toolkit' in path_str or 'ai_toolkit' in path_str:
+        return "AI-Toolkit"
     
     # Check for MLX
     if 'mlx' in path_str and ('community' in path_str or 'application support' in path_str):
@@ -44,13 +68,14 @@ def detect_tool(filepath: Path) -> str:
         return "Stable Diffusion"
     
     # Check for PyTorch (common in model repos)
-    if 'pytorch' in path_str or '.pth' in path_str.lower() or '.pt' in path_str.lower():
+    # Use suffix check to avoid false positives from paths containing "pth" as substring
+    if 'pytorch' in path_str or filepath.suffix.lower() in ('.pth', '.pt'):
         # Only if it's clearly a model directory, not just any Python project
         if 'models' in path_str or 'checkpoints' in path_str or 'weights' in path_str:
             return "PyTorch"
     
     # Check for TensorFlow
-    if 'tensorflow' in path_str or '.tflite' in path_str.lower() or '.mlmodel' in path_str.lower():
+    if 'tensorflow' in path_str or filepath.suffix.lower() in ('.tflite', '.mlmodel'):
         if 'models' in path_str or 'checkpoints' in path_str:
             return "TensorFlow"
     

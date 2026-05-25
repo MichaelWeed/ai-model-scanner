@@ -3,9 +3,10 @@
 import json
 import os
 import sys
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .model_analyzer import ModelInfo
 
@@ -45,12 +46,15 @@ def save_scan_results(models: List[ModelInfo], scan_params: Optional[dict] = Non
     try:
         with open(cache_path, 'w') as f:
             json.dump(data, f, indent=2)
-    except Exception:
-        # Silently fail - cache is optional
-        pass
+    except Exception as e:
+        warnings.warn(
+            f"Could not save scan results cache: {e}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
-def load_scan_results(max_age_hours: int = 24) -> Optional[tuple[List[ModelInfo], dict]]:
+def load_scan_results(max_age_hours: int = 24) -> Optional[Tuple[List[ModelInfo], dict]]:
     """
     Load scan results from cache if available and recent.
     
@@ -95,8 +99,14 @@ def load_scan_results(max_age_hours: int = 24) -> Optional[tuple[List[ModelInfo]
         scan_params = data.get('scan_params', {})
         return models, scan_params
     
-    except Exception:
+    except Exception as e:
         # Cache is corrupted or invalid
+        warnings.warn(
+            f"Cache file is corrupted or unreadable and will be ignored: {e}. "
+            "Run 'scan' to rebuild it.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return None
 
 
@@ -143,7 +153,7 @@ def get_directory_index_path() -> Path:
     return cache_dir / "directory_index.json"
 
 
-def load_directory_index() -> Dict[str, dict]:
+def load_directory_index() -> Dict[str, dict]:  # noqa: UP006
     """
     Load directory index from cache.
     
@@ -165,7 +175,7 @@ def load_directory_index() -> Dict[str, dict]:
         return {}
 
 
-def save_directory_index(index: Dict[str, dict]) -> None:
+def save_directory_index(index: Dict[str, dict]) -> None:  # noqa: UP006
     """
     Save directory index to cache.
     
@@ -177,9 +187,12 @@ def save_directory_index(index: Dict[str, dict]) -> None:
     try:
         with open(index_path, 'w') as f:
             json.dump(index, f, indent=2)
-    except Exception:
-        # Silently fail - cache is optional
-        pass
+    except Exception as e:
+        warnings.warn(
+            f"Could not save directory index cache: {e}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 def update_directory_index(directory: Path, models: List[ModelInfo]) -> None:

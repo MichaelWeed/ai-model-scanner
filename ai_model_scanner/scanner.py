@@ -146,7 +146,7 @@ class Scanner:
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = []
             for filepath in files:
-                if is_model_extension(filepath.name, self.model_extensions):
+                if is_model_extension(filepath.name, self.model_extensions, filepath=filepath):
                     future = executor.submit(
                         analyze_model_file,
                         filepath,
@@ -197,13 +197,14 @@ class Scanner:
                 for ext in self.model_extensions:
                     cmd.extend(["-e", ext.lstrip('.').lower()])
                 
-                cmd.extend([".", str(root)])
+                # fd requires the root directory as the last positional argument.
+                # Do NOT pass '.' before it — fd interprets that as a regex pattern.
+                cmd.extend([str(root)])
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
                     timeout=300,  # 5 minute timeout
-                    cwd=str(root)
                 )
                 if result.returncode == 0:
                     files = [Path(line.strip()) for line in result.stdout.splitlines() if line.strip()]
@@ -235,7 +236,10 @@ class Scanner:
                 text=True,
                 timeout=600,  # 10 minute timeout for find
             )
-            if result.returncode == 0:
+            # Accept exit code 0 (success) and 1 (partial results due to
+            # permission errors) — 'find' uses code 1 when it can't read some
+            # directories even if it successfully found files in others.
+            if result.returncode in (0, 1) and result.stdout.strip():
                 files = [Path(line.strip()) for line in result.stdout.splitlines() if line.strip()]
                 if progress:
                     progress.console.print(f"[green]Found {len(files)} files using find[/green]")
@@ -322,7 +326,7 @@ class Scanner:
         
         try:
             for item in directory.rglob("*"):
-                if item.is_file() and is_model_extension(item.name, self.model_extensions):
+                if item.is_file() and is_model_extension(item.name, self.model_extensions, filepath=item):
                     try:
                         if item.stat().st_size >= self.min_size_bytes:
                             model = analyze_model_file(
@@ -355,7 +359,7 @@ class Scanner:
         
         try:
             for item in root.rglob("*"):
-                if item.is_file() and is_model_extension(item.name, self.model_extensions):
+                if item.is_file() and is_model_extension(item.name, self.model_extensions, filepath=item):
                     try:
                         if item.stat().st_size >= self.min_size_bytes:
                             files.append(item)
@@ -404,74 +408,88 @@ class Scanner:
             known_models = self.scan_known_paths(progress, use_incremental=use_incremental)
             all_models.extend(known_models)
             seen_paths.update(model.path for model in known_models)
-        
-        # Perform broad system scan
-        if root is None:
-            root = Path.home()
-        
-        broad_models = self.scan_broad_system(root, progress)
-        
-        # Deduplicate and learn paths
-        discovered_paths_by_tool: dict = {}
-        for model in broad_models:
-            if model.path not in seen_paths:
-                all_models.append(model)
-                seen_paths.add(model.path)
-                
-                # Learn paths: extract parent directory if it's not in known paths
-                if learn_paths and model.tool != "Unknown":
-                    model_dir = model.path.parent
-                    # Check if this directory (or a parent) should be learned
-                    # Look for common patterns like "models", "checkpoints", etc.
-                    path_str = str(model_dir).lower()
-                    if any(pattern in path_str for pattern in ['models', 'checkpoints', 'loras', 'weights']):
-                        # Check if this path or a parent is already known
-                        is_known = False
-                        for known_path in known_paths_set:
-                            try:
-                                if model_dir == known_path or model_dir.is_relative_to(known_path):
-                                    is_known = True
-                                    break
-                            except (ValueError, AttributeError):
-                                # Path comparison failed, skip
-                                pass
-                        
-                        if not is_known:
-                            # Store for learning (use the most specific directory with "models" in it)
-                            if model.tool not in discovered_paths_by_tool:
-                                discovered_paths_by_tool[model.tool] = set()
-                            
-                            # Find the best directory to learn (prefer directories with "models" in name)
-                            current = model_dir
-                            best_dir = current
-                            for _ in range(3):  # Check up to 3 levels up
-                                if 'models' in current.name.lower() or 'checkpoint' in current.name.lower():
-                                    best_dir = current
-                                    break
-                                if current.parent == current:  # Reached root
-                                    break
-                                current = current.parent
-                            
-                            discovered_paths_by_tool[model.tool].add(best_dir)
-        
-        # Learn discovered paths
-        if learn_paths and discovered_paths_by_tool:
-            learned_count = 0
-            for tool_name, paths in discovered_paths_by_tool.items():
-                for path in paths:
-                    # Convert to string, using ~ for home directory if applicable
-                    path_str = str(path)
-                    try:
-                        home = Path.home()
-                        if path.is_relative_to(home):
-                            path_str = "~/" + str(path.relative_to(home))
-                    except (ValueError, AttributeError):
-                        pass
-                    
-                    if self.config.add_discovered_path(tool_name, path_str):
-                        learned_count += 1
-            
-            if learned_count > 0 and progress:
-                progress.console.print(f"\n[green]Learned {learned_count} new path(s) from discovered models[/green]")
-        
-        return all_models
+
+        # Only perform a broad system scan when explicitly requested via full_scan.
+        # Without this guard, every invocation sweeps the entire home directory
+        # even when known-paths mode already found the models.
+        if full_scan:
+            if root is None:
+                root = Path.home()
+
+            broad_models = self.scan_broad_system(root, progress)
+
+            # Deduplicate and learn paths
+            discovered_paths_by_tool: dict = {}
+            for model in broad_models:
+                if model.path not in seen_paths:
+                    all_models.append(model)
+                    seen_paths.add(model.path)
+
+                    # Learn paths: extract parent directory if it's not in known paths
+                    if learn_paths and model.tool != "Unknown":
+                        model_dir = model.path.parent
+                        # Look for common patterns like "models", "checkpoints", etc.
+                        path_str = str(model_dir).lower()
+                        if any(pattern in path_str for pattern in ['models', 'checkpoints', 'loras', 'weights']):
+                            # Check if this path or a parent is already known
+                            is_known = False
+                            for known_path in known_paths_set:
+                                try:
+                                    if model_dir == known_path or model_dir.is_relative_to(known_path):
+                                        is_known = True
+                                        break
+                                except (ValueError, AttributeError):
+                                    pass
+
+                            if not is_known:
+                                if model.tool not in discovered_paths_by_tool:
+                                    discovered_paths_by_tool[model.tool] = set()
+
+                                current = model_dir
+                                best_dir = current
+                                for _ in range(3):
+                                    if 'models' in current.name.lower() or 'checkpoint' in current.name.lower():
+                                        best_dir = current
+                                        break
+                                    if current.parent == current:
+                                        break
+                                    current = current.parent
+
+                                discovered_paths_by_tool[model.tool].add(best_dir)
+
+            # Learn discovered paths
+            if learn_paths and discovered_paths_by_tool:
+                learned_count = 0
+                for tool_name, paths in discovered_paths_by_tool.items():
+                    for path in paths:
+                        path_str = str(path)
+                        try:
+                            home = Path.home()
+                            if path.is_relative_to(home):
+                                path_str = "~/" + str(path.relative_to(home))
+                        except (ValueError, AttributeError):
+                            pass
+
+                        if self.config.add_discovered_path(tool_name, path_str):
+                            learned_count += 1
+
+                if learned_count > 0 and progress:
+                    progress.console.print(f"\n[green]Learned {learned_count} new path(s) from discovered models[/green]")
+
+        # ------------------------------------------------------------------ #
+        # Final deduplication by resolved canonical path.                     #
+        # analyze_model_file() already stores filepath.resolve(), so this     #
+        # pass catches any remaining duplicates from overlapping scan paths   #
+        # (e.g. the same dir reached via two known-path entries, or a         #
+        # symlink that maps ComfyUI extra_model_paths back to ~/Models/).     #
+        # ------------------------------------------------------------------ #
+        unique_models: List[ModelInfo] = []
+        seen_canonical: Set[Path] = set()
+        for model in all_models:
+            canonical = model.path  # already resolved by analyze_model_file
+            if canonical not in seen_canonical:
+                seen_canonical.add(canonical)
+                unique_models.append(model)
+
+        return unique_models
+
